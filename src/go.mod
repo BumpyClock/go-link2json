@@ -1,4 +1,4 @@
-module link-to-json
+module github.com/BumpyClock/go-link2json
 
 go 1.22.1
 
