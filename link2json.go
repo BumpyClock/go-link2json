@@ -16,6 +16,7 @@ var (
 	LINK2JSON_DEBUG bool
 )
 
+// / init function is called before the main function
 func init() {
 	LINK2JSON_DEBUG = true // default value
 
