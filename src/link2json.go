@@ -2,6 +2,7 @@ package link2json
 
 import (
 	URL "net/url"
+	"os"
 	"strconv"
 
 	"github.com/gocolly/colly"
@@ -10,9 +11,24 @@ import (
 )
 
 var (
-	cch       = cache.New(cache.NoExpiration, cache.NoExpiration)
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+	cch             = cache.New(cache.NoExpiration, cache.NoExpiration)
+	userAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+	LINK2JSON_DEBUG bool
 )
+
+func init() {
+	LINK2JSON_DEBUG = true // default value
+
+	if value, exists := os.LookupEnv("LINK2JSON_DEBUG"); exists {
+		if parsedValue, err := strconv.ParseBool(value); err == nil {
+			LINK2JSON_DEBUG = parsedValue
+		}
+	}
+	if LINK2JSON_DEBUG {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+}
 
 func GetMetadata(url string) (*MetaDataResponseItem, error) {
 
@@ -23,7 +39,7 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 
 	c := colly.NewCollector()
 	c.OnRequest(func(r *colly.Request) {
-		logrus.Info("Visiting", r.URL)
+		logrus.Debug("Visiting", r.URL)
 		r.Headers.Set("User-Agent", userAgent)
 	})
 	result := &MetaDataResponseItem{URL: url, Images: []WebImage{}}
@@ -69,19 +85,19 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	})
 	c.OnScraped(func(r *colly.Response) {
 		result.Images = append(result.Images, webImage)
-		logrus.Info("Scraping finished", url)
+		logrus.Debug("[GetMetaData] Scraping finished", url)
 	})
 
 	// Handle visiting the URL
 	err := c.Visit(url)
 	if err != nil {
-		logrus.Error("Failed to visit URL: ", err)
+		logrus.Error("[GetMetaData] Failed to visit URL: ", err)
 		return nil, err
 	}
 
 	if result.Sitename == "" {
 		c2 := colly.NewCollector()
-		logrus.Info("Visiting", result.Domain)
+		logrus.Debug("Visiting", result.Domain)
 		c2.OnHTML(`meta[property="og:title"]`, func(e *colly.HTMLElement) {
 			result.Sitename = e.Attr("content")
 
@@ -89,7 +105,7 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 
 		err = c2.Visit(result.Domain)
 		if err != nil {
-			logrus.Error("Failed to visit base domain: ", err)
+			logrus.Error("[GetMetaData] Failed to visit base domain: ", err)
 			return nil, err
 		}
 	}
@@ -98,6 +114,10 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	cch.Set(url, result, cache.DefaultExpiration)
 
 	return result, nil
+}
+
+func ParsePage(url string) {
+
 }
 
 func getBaseDomain(url string) string {
