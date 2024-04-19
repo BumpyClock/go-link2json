@@ -26,6 +26,7 @@ func init() {
 		}
 	}
 	if LINK2JSON_DEBUG {
+		logrus.Info("[Link2Json] Debug mode is enabled. To disable set env LINK2JSON_DEBUG=release.")
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
