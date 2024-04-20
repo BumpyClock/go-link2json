@@ -49,6 +49,13 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	c.OnRequest(func(r *colly.Request) {
 		logrus.Debug("Visiting", r.URL)
 		r.Headers.Set("User-Agent", userAgent)
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
+		r.Headers.Set("Accept-Encoding", "gzip, deflate, br")
+		r.Headers.Set("Referer", "https://www.google.com/")
+		r.Headers.Set("Connection", "keep-alive")
+		r.Headers.Set("Upgrade-Insecure-Requests", "1")
+		r.Headers.Set("DNT", "1")
 	})
 	result := &MetaDataResponseItem{URL: url, Images: []WebImage{}}
 	result.Domain = getBaseDomain(url)
@@ -65,6 +72,7 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	c.OnHTML(`link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`, func(e *colly.HTMLElement) {
 		if result.Favicon == "" {
 			href := e.Attr("href")
+			logrus.Debug("[Link2JSON] Favicon found", href)
 			parsedURL, err := URL.Parse(href)
 			if err != nil || !parsedURL.IsAbs() {
 				result.Favicon = result.Domain + href
