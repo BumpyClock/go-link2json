@@ -64,7 +64,13 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	})
 	c.OnHTML(`link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`, func(e *colly.HTMLElement) {
 		if result.Favicon == "" {
-			result.Favicon = result.Domain + e.Attr("href")
+			href := e.Attr("href")
+			_, err := URL.ParseRequestURI(href)
+			if err != nil {
+				result.Favicon = result.Domain + href
+			} else {
+				result.Favicon = href
+			}
 		}
 	})
 	c.OnHTML(`meta[property="og:site_name"]`, func(e *colly.HTMLElement) {
