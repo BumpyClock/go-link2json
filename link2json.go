@@ -65,8 +65,8 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	c.OnHTML(`link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`, func(e *colly.HTMLElement) {
 		if result.Favicon == "" {
 			href := e.Attr("href")
-			_, err := URL.ParseRequestURI(href)
-			if err != nil {
+			parsedURL, err := URL.Parse(href)
+			if err != nil || !parsedURL.IsAbs() {
 				result.Favicon = result.Domain + href
 			} else {
 				result.Favicon = href
