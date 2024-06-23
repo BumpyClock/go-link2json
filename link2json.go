@@ -106,6 +106,7 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 	// Handle visiting the URL
 	err := c.Visit(url)
 	if err != nil {
+		logrus.Debug("[GetMetaData] Failed to visit URL: ", url)
 		logrus.Error("[GetMetaData] Failed to visit URL: ", err)
 		return nil, err
 	}
@@ -115,13 +116,13 @@ func GetMetadata(url string) (*MetaDataResponseItem, error) {
 		logrus.Debug("Visiting", result.Domain)
 		c2.OnHTML(`meta[property="og:title"]`, func(e *colly.HTMLElement) {
 			result.Sitename = e.Attr("content")
-
 		})
 
 		err = c2.Visit(result.Domain)
 		if err != nil {
+			// Log the error but do not return it, allowing the function to proceed
 			logrus.Error("[GetMetaData] Failed to visit base domain: ", err)
-			return nil, err
+			// Do not return here, allowing the function to continue
 		}
 	}
 
