@@ -16,10 +16,8 @@ var (
 	LINK2JSON_DEBUG bool
 )
 
-// / init function is called before the main function
 func init() {
-	LINK2JSON_DEBUG = true // default value
-
+	LINK2JSON_DEBUG = true
 	if value, exists := os.LookupEnv("LINK2JSON_DEBUG"); exists {
 		if parsedValue, err := strconv.ParseBool(value); err == nil {
 			LINK2JSON_DEBUG = parsedValue
