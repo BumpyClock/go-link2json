@@ -30,7 +30,7 @@ func init() {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 	if value, exists := os.LookupEnv("LINK2JSON_USER_AGENT"); exists {
 		userAgent = value
