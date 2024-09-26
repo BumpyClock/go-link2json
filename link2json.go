@@ -271,7 +271,7 @@ func scrapeWithChromedp(targetURL string) (*MetaDataResponseItem, error) {
 	defer cancel()
 
 	// Set a timeout to prevent hanging
-	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
 
 	var htmlContent string
