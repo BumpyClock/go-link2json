@@ -9,19 +9,22 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/chromedp/chromedp"
 	"github.com/gocolly/colly"
 	"github.com/patrickmn/go-cache"
 	"github.com/sirupsen/logrus"
 )
 
-// MetaDataResponseItem represents the metadata extracted from a URL.
-
 var (
 	// cch is the in-memory cache for storing metadata responses.
 	cch             = cache.New(24*time.Hour, 48*time.Hour) // Example: 24-hour expiration
 	userAgent       string
 	LINK2JSON_DEBUG bool
+
+	// Concurrency control
+	maxConcurrentBrowsers = 5
+	chromedpSemaphore     = make(chan struct{}, maxConcurrentBrowsers)
 )
 
 // init initializes the module, setting up logging and user agent.
@@ -53,6 +56,23 @@ func init() {
 	if value, exists := os.LookupEnv("LINK2JSON_USER_AGENT"); exists {
 		userAgent = value
 	}
+}
+
+// GetMetadataWithRetry fetches and returns metadata for the given URL with retries.
+func GetMetadataWithRetry(targetURL string) (*MetaDataResponseItem, error) {
+	var result *MetaDataResponseItem
+	operation := func() error {
+		var err error
+		result, err = GetMetadata(targetURL)
+		return err
+	}
+
+	err := backoff.Retry(operation, backoff.NewExponentialBackOff())
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // GetMetadata fetches and returns metadata for the given URL.
@@ -103,18 +123,23 @@ func GetMetadata(targetURL string) (*MetaDataResponseItem, error) {
 }
 
 // fetchRenderedHTML uses Chromedp to navigate to the URL and return the rendered HTML.
-// fetchRenderedHTML uses Chromedp to navigate to the URL and return the rendered HTML.
 func fetchRenderedHTML(targetURL string) (string, error) {
-	// Create a new Chromedp context with headless options
+	// Acquire semaphore for concurrency control
+	chromedpSemaphore <- struct{}{}
+	defer func() { <-chromedpSemaphore }()
+
+	// Define Chromedp allocator options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true), // Ensure headless mode
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-		chromedp.UserAgent(userAgent), // Use the configured User-Agent
+		chromedp.Flag("headless", true),                        // Ensure headless mode
+		chromedp.Flag("disable-gpu", true),                     // Disable GPU usage
+		chromedp.Flag("no-sandbox", true),                      // Disable sandboxing
+		chromedp.Flag("disable-dev-shm-usage", true),           // Overcome limited resource problems
+		chromedp.Flag("blink-settings", "imagesEnabled=false"), // Optional: Disable image loading for performance
+		chromedp.UserAgent(userAgent),                          // Use the configured User-Agent
+		// chromedp.ExecPath("/usr/bin/chromium-browser"), // Uncomment and set if necessary
 	)
 
-	// Create an ExecAllocator context with the options
+	// Create a new allocator context
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
@@ -129,7 +154,7 @@ func fetchRenderedHTML(targetURL string) (string, error) {
 	var htmlContent string
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
+		chromedp.WaitVisible("body", chromedp.ByQuery), // Wait for the body to be visible
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	)
 	if err != nil {
