@@ -393,6 +393,7 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 
 // isMetadataComplete checks if the metadata contains at least one essential field.
 func isMetadataComplete(metadata *MetaDataResponseItem) bool {
+	logrus.Debugf("[isMetadataComplete] Title: %s, Description: %s, Sitename: %s, Images: %d", metadata.Title, metadata.Description, metadata.Sitename, len(metadata.Images))
 	return strings.TrimSpace(metadata.Title) != "" ||
 		strings.TrimSpace(metadata.Description) != "" ||
 		strings.TrimSpace(metadata.Sitename) != "" &&
