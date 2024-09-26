@@ -6,10 +6,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/cenkalti/backoff/v4"
 	"github.com/chromedp/chromedp"
 	"github.com/gocolly/colly"
 	"github.com/patrickmn/go-cache"
@@ -18,13 +18,22 @@ import (
 
 var (
 	// cch is the in-memory cache for storing metadata responses.
-	cch             = cache.New(24*time.Hour, 48*time.Hour) // Example: 24-hour expiration
-	userAgent       string
+	cch = cache.New(24*time.Hour, 48*time.Hour) // Example: 24-hour expiration
+
+	// chromedpWhitelist stores domains that require Chromedp for scraping.
+	chromedpWhitelist = cache.New(cache.NoExpiration, cache.NoExpiration)
+
+	// Mutex to protect concurrent access to chromedpWhitelist.
+	whitelistMutex sync.RWMutex
+
+	// userAgent is the User-Agent string used in HTTP requests.
+	userAgent string
+
+	// LINK2JSON_DEBUG enables or disables debug logging.
 	LINK2JSON_DEBUG bool
 
-	// Concurrency control
-	maxConcurrentBrowsers = 5
-	chromedpSemaphore     = make(chan struct{}, maxConcurrentBrowsers)
+	// chromedpSemaphore controls the maximum number of concurrent Chromedp instances.
+	chromedpSemaphore = make(chan struct{}, 5) // Example: limit to 5 concurrent Chromedp instances
 )
 
 // init initializes the module, setting up logging and user agent.
@@ -58,73 +67,187 @@ func init() {
 	}
 }
 
-// GetMetadataWithRetry fetches and returns metadata for the given URL with retries.
-func GetMetadataWithRetry(targetURL string) (*MetaDataResponseItem, error) {
-	var result *MetaDataResponseItem
-	operation := func() error {
-		var err error
-		result, err = GetMetadata(targetURL)
-		return err
-	}
-
-	err := backoff.Retry(operation, backoff.NewExponentialBackOff())
+// GetMetadata fetches and returns metadata for the given URL.
+// It first attempts to use Colly for scraping. If Colly fails to extract sufficient metadata,
+// it falls back to Chromedp. Domains requiring Chromedp are cached for future requests.
+func GetMetadata(targetURL string) (*MetaDataResponseItem, error) {
+	// Normalize the URL
+	normalizedURL, err := normalizeURL(targetURL)
 	if err != nil {
+		logrus.Errorf("[GetMetadata] Invalid URL %s: %v", targetURL, err)
 		return nil, err
 	}
+
+	// Check metadata cache first
+	if cached, found := cch.Get(normalizedURL); found {
+		logrus.Debugf("[GetMetadata] Cache hit for URL: %s", normalizedURL)
+		return cached.(*MetaDataResponseItem), nil
+	}
+
+	// Parse the URL to extract the domain
+	parsedURL, err := urlpkg.Parse(normalizedURL)
+	if err != nil {
+		logrus.Errorf("[GetMetadata] Failed to parse URL %s: %v", normalizedURL, err)
+		return nil, err
+	}
+	domain := parsedURL.Hostname()
+
+	// Check if the domain is in the Chromedp whitelist
+	if isWhitelisted(domain) {
+		logrus.Debugf("[GetMetadata] Domain %s is whitelisted. Using Chromedp.", domain)
+		result, err := scrapeWithChromedp(normalizedURL)
+		if err != nil {
+			logrus.Errorf("[GetMetadata] Chromedp failed for URL %s: %v", normalizedURL, err)
+			return nil, err
+		}
+		// Cache the result
+		cch.Set(normalizedURL, result, cache.DefaultExpiration)
+		return result, nil
+	}
+
+	// Attempt to scrape with Colly
+	logrus.Debugf("[GetMetadata] Attempting to scrape with Colly for URL: %s", normalizedURL)
+	result, err := scrapeWithColly(normalizedURL)
+	if err != nil {
+		logrus.Errorf("[GetMetadata] Colly scraping failed for URL %s: %v", normalizedURL, err)
+		// Since Colly failed, fallback to Chromedp
+		logrus.Debugf("[GetMetadata] Falling back to Chromedp for URL: %s", normalizedURL)
+		result, err = scrapeWithChromedp(normalizedURL)
+		if err != nil {
+			logrus.Errorf("[GetMetadata] Chromedp scraping failed for URL %s: %v", normalizedURL, err)
+			return nil, err
+		}
+		// Add domain to Chromedp whitelist for future requests
+		addToWhitelist(domain)
+		// Cache the result
+		cch.Set(normalizedURL, result, cache.DefaultExpiration)
+		return result, nil
+	}
+
+	// Determine if Colly extracted sufficient metadata
+	if isMetadataComplete(result) {
+		logrus.Debugf("[GetMetadata] Colly scraping succeeded for URL: %s", normalizedURL)
+		// Cache the result
+		cch.Set(normalizedURL, result, cache.DefaultExpiration)
+		return result, nil
+	}
+
+	// If metadata is incomplete, fallback to Chromedp
+	logrus.Debugf("[GetMetadata] Colly scraping incomplete for URL: %s. Falling back to Chromedp.", normalizedURL)
+	result, err = scrapeWithChromedp(normalizedURL)
+	if err != nil {
+		logrus.Errorf("[GetMetadata] Chromedp scraping failed for URL %s: %v", normalizedURL, err)
+		return nil, err
+	}
+
+	// Add domain to Chromedp whitelist for future requests
+	addToWhitelist(domain)
+
+	// Cache the result
+	cch.Set(normalizedURL, result, cache.DefaultExpiration)
 
 	return result, nil
 }
 
-// GetMetadata fetches and returns metadata for the given URL.
-// It uses Colly for static pages and Chromedp for dynamically rendered pages.
-func GetMetadata(targetURL string) (*MetaDataResponseItem, error) {
-	// Check cache first
-	if cached, found := cch.Get(targetURL); found {
-		logrus.Debugf("[GetMetadata] Cache hit for URL: %s", targetURL)
-		return cached.(*MetaDataResponseItem), nil
-	}
+// scrapeWithColly uses the Colly library to scrape metadata from static pages.
+func scrapeWithColly(targetURL string) (*MetaDataResponseItem, error) {
+	// Initialize Colly collector
+	c := colly.NewCollector(
+		colly.UserAgent(userAgent),
+		colly.AllowURLRevisit(),
+	)
 
-	// Initialize result
+	// Initialize the result
 	result := &MetaDataResponseItem{
 		URL:    targetURL,
 		Images: []WebImage{},
 	}
 	result.Domain = getBaseDomain(targetURL)
 
-	// Determine if the URL requires JavaScript rendering
-	useChromedp := requiresJavaScript(targetURL)
+	// Temporary storage for WebImage
+	var tempWebImage WebImage
 
-	if useChromedp {
-		logrus.Debugf("[GetMetadata] Using Chromedp for URL: %s", targetURL)
-		htmlContent, err := fetchRenderedHTML(targetURL)
-		if err != nil {
-			logrus.Errorf("[GetMetadata] Chromedp failed for URL %s: %v", targetURL, err)
-			return nil, err
-		}
+	// Set up Colly callbacks
+	c.OnRequest(func(r *colly.Request) {
+		logrus.Debugf("[Colly] Visiting %s", r.URL.String())
+		r.Headers.Set("User-Agent", userAgent)
+	})
 
-		// Parse the rendered HTML using goquery
-		if err := parseHTMLWithGoquery(htmlContent, result); err != nil {
-			logrus.Errorf("[GetMetadata] Failed to parse HTML with goquery for URL %s: %v", targetURL, err)
-			return nil, err
+	c.OnHTML("title", func(e *colly.HTMLElement) {
+		if strings.TrimSpace(result.Title) == "" {
+			result.Title = strings.TrimSpace(e.Text)
 		}
-	} else {
-		logrus.Debugf("[GetMetadata] Using Colly for URL: %s", targetURL)
-		// Use Colly for static pages
-		if err := scrapeWithColly(targetURL, result); err != nil {
-			logrus.Errorf("[GetMetadata] Colly failed for URL %s: %v", targetURL, err)
-			return nil, err
+	})
+
+	c.OnHTML(`meta[name="description"]`, func(e *colly.HTMLElement) {
+		if strings.TrimSpace(result.Description) == "" {
+			result.Description = strings.TrimSpace(e.Attr("content"))
 		}
+	})
+
+	c.OnHTML(`link[rel="icon"], link[rel="shortcut icon"], link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`, func(e *colly.HTMLElement) {
+		if strings.TrimSpace(result.Favicon) == "" {
+			href := strings.TrimSpace(e.Attr("href"))
+			logrus.Debugf("[Colly] Favicon found: %s", href)
+			parsedHref, err := urlpkg.Parse(href)
+			if err != nil || !parsedHref.IsAbs() {
+				result.Favicon = result.Domain + href
+			} else {
+				result.Favicon = href
+			}
+		}
+	})
+
+	c.OnHTML(`meta[property="og:site_name"]`, func(e *colly.HTMLElement) {
+		if strings.TrimSpace(result.Sitename) == "" {
+			result.Sitename = strings.TrimSpace(e.Attr("content"))
+		}
+	})
+
+	c.OnHTML(`meta[property="og:image"]`, func(e *colly.HTMLElement) {
+		tempWebImage.URL = strings.TrimSpace(e.Attr("content"))
+	})
+
+	c.OnHTML(`meta[property="og:image:alt"]`, func(e *colly.HTMLElement) {
+		tempWebImage.Alt = strings.TrimSpace(e.Attr("content"))
+	})
+
+	c.OnHTML(`meta[property="og:image:type"]`, func(e *colly.HTMLElement) {
+		tempWebImage.Type = strings.TrimSpace(e.Attr("content"))
+	})
+
+	c.OnHTML(`meta[property="og:image:width"]`, func(e *colly.HTMLElement) {
+		width, err := strconv.Atoi(strings.TrimSpace(e.Attr("content")))
+		if err == nil {
+			tempWebImage.Width = width
+		}
+	})
+
+	c.OnHTML(`meta[property="og:image:height"]`, func(e *colly.HTMLElement) {
+		height, err := strconv.Atoi(strings.TrimSpace(e.Attr("content")))
+		if err == nil {
+			tempWebImage.Height = height
+		}
+	})
+
+	c.OnScraped(func(r *colly.Response) {
+		if tempWebImage.URL != "" {
+			result.Images = append(result.Images, tempWebImage)
+			logrus.Debugf("[Colly] Scraping finished for %s", r.Request.URL.String())
+		}
+	})
+
+	// Visit the target URL
+	if err := c.Visit(targetURL); err != nil {
+		return nil, err
 	}
-
-	// Cache the result
-	cch.Set(targetURL, result, cache.DefaultExpiration)
 
 	return result, nil
 }
 
-// fetchRenderedHTML uses Chromedp to navigate to the URL and return the rendered HTML.
-func fetchRenderedHTML(targetURL string) (string, error) {
-	// Acquire semaphore for concurrency control
+// scrapeWithChromedp uses Chromedp to scrape metadata from dynamically rendered pages.
+func scrapeWithChromedp(targetURL string) (*MetaDataResponseItem, error) {
+	// Acquire semaphore to limit concurrency
 	chromedpSemaphore <- struct{}{}
 	defer func() { <-chromedpSemaphore }()
 
@@ -154,15 +277,27 @@ func fetchRenderedHTML(targetURL string) (string, error) {
 	var htmlContent string
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(targetURL),
-		chromedp.WaitVisible("body", chromedp.ByQuery), // Wait for the body to be visible
+		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.OuterHTML("html", &htmlContent, chromedp.ByQuery),
 	)
 	if err != nil {
-		logrus.Error("[fetchRenderedHTML] Chromedp navigation failed:", err)
-		return "", err
+		logrus.Error("[Chromedp] Navigation failed:", err)
+		return nil, err
 	}
 
-	return htmlContent, nil
+	// Parse the rendered HTML using goquery
+	result := &MetaDataResponseItem{
+		URL:    targetURL,
+		Images: []WebImage{},
+	}
+	result.Domain = getBaseDomain(targetURL)
+
+	if err := parseHTMLWithGoquery(htmlContent, result); err != nil {
+		logrus.Errorf("[Chromedp] Failed to parse HTML for URL %s: %v", targetURL, err)
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // parseHTMLWithGoquery parses the HTML content using goquery and fills the result.
@@ -174,23 +309,24 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 
 	// Extract <title>
 	doc.Find("title").Each(func(i int, s *goquery.Selection) {
-		if result.Title == "" {
-			result.Title = s.Text()
+		if strings.TrimSpace(result.Title) == "" {
+			result.Title = strings.TrimSpace(s.Text())
 		}
 	})
 
 	// Extract meta description
 	doc.Find(`meta[name="description"]`).Each(func(i int, s *goquery.Selection) {
-		if desc, exists := s.Attr("content"); exists && result.Description == "" {
-			result.Description = desc
+		if desc, exists := s.Attr("content"); exists && strings.TrimSpace(result.Description) == "" {
+			result.Description = strings.TrimSpace(desc)
 		}
 	})
 
 	// Extract favicon
 	doc.Find(`link[rel="icon"], link[rel="shortcut icon"], ` +
 		`link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`).Each(func(i int, s *goquery.Selection) {
-		if result.Favicon == "" {
+		if strings.TrimSpace(result.Favicon) == "" {
 			if href, exists := s.Attr("href"); exists {
+				href = strings.TrimSpace(href)
 				parsedHref, err := urlpkg.Parse(href)
 				if err != nil || !parsedHref.IsAbs() {
 					result.Favicon = result.Domain + href
@@ -203,8 +339,8 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 
 	// Extract OpenGraph site name
 	doc.Find(`meta[property="og:site_name"]`).Each(func(i int, s *goquery.Selection) {
-		if sitename, exists := s.Attr("content"); exists && result.Sitename == "" {
-			result.Sitename = sitename
+		if sitename, exists := s.Attr("content"); exists && strings.TrimSpace(result.Sitename) == "" {
+			result.Sitename = strings.TrimSpace(sitename)
 		}
 	})
 
@@ -212,40 +348,42 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 	doc.Find(`meta[property="og:image"]`).Each(func(i int, s *goquery.Selection) {
 		img := WebImage{}
 		if imgURL, exists := s.Attr("content"); exists {
-			img.URL = imgURL
+			img.URL = strings.TrimSpace(imgURL)
 		}
 		// Extract additional og:image properties
 		parent := s.Parent()
 		if parent != nil {
 			// og:image:alt
 			if alt, exists := parent.Find(`meta[property="og:image:alt"]`).Attr("content"); exists {
-				img.Alt = alt
+				img.Alt = strings.TrimSpace(alt)
 			}
 			// og:image:type
 			if imgType, exists := parent.Find(`meta[property="og:image:type"]`).Attr("content"); exists {
-				img.Type = imgType
+				img.Type = strings.TrimSpace(imgType)
 			}
 			// og:image:width
 			if widthStr, exists := parent.Find(`meta[property="og:image:width"]`).Attr("content"); exists {
-				if width, err := strconv.Atoi(widthStr); err == nil {
+				if width, err := strconv.Atoi(strings.TrimSpace(widthStr)); err == nil {
 					img.Width = width
 				}
 			}
 			// og:image:height
 			if heightStr, exists := parent.Find(`meta[property="og:image:height"]`).Attr("content"); exists {
-				if height, err := strconv.Atoi(heightStr); err == nil {
+				if height, err := strconv.Atoi(strings.TrimSpace(heightStr)); err == nil {
 					img.Height = height
 				}
 			}
 		}
-		result.Images = append(result.Images, img)
+		if img.URL != "" {
+			result.Images = append(result.Images, img)
+		}
 	})
 
 	// Fallback to og:title if sitename is still empty
-	if result.Sitename == "" {
+	if strings.TrimSpace(result.Sitename) == "" {
 		doc.Find(`meta[property="og:title"]`).Each(func(i int, s *goquery.Selection) {
-			if sitename, exists := s.Attr("content"); exists && result.Sitename == "" {
-				result.Sitename = sitename
+			if sitename, exists := s.Attr("content"); exists && strings.TrimSpace(result.Sitename) == "" {
+				result.Sitename = strings.TrimSpace(sitename)
 			}
 		})
 	}
@@ -253,150 +391,24 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 	return nil
 }
 
-// scrapeWithColly uses the Colly library to scrape metadata from static pages.
-func scrapeWithColly(targetURL string, result *MetaDataResponseItem) error {
-	c := colly.NewCollector(
-		colly.UserAgent(userAgent),
-	)
-
-	webImage := WebImage{}
-
-	// Set up Colly callbacks
-	c.OnRequest(func(r *colly.Request) {
-		logrus.Debugf("[Colly] Visiting %s", r.URL.String())
-		r.Headers.Set("User-Agent", userAgent)
-	})
-
-	c.OnHTML("title", func(e *colly.HTMLElement) {
-		if result.Title == "" {
-			result.Title = e.Text
-		}
-	})
-
-	c.OnHTML(`meta[name="description"]`, func(e *colly.HTMLElement) {
-		if result.Description == "" {
-			result.Description = e.Attr("content")
-		}
-	})
-
-	c.OnHTML(`link[rel="icon"], link[rel="shortcut icon"], `+
-		`link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]`, func(e *colly.HTMLElement) {
-		if result.Favicon == "" {
-			href := e.Attr("href")
-			logrus.Debugf("[Colly] Favicon found: %s", href)
-			parsedHref, err := urlpkg.Parse(href)
-			if err != nil || !parsedHref.IsAbs() {
-				result.Favicon = result.Domain + href
-			} else {
-				result.Favicon = href
-			}
-		}
-	})
-
-	c.OnHTML(`meta[property="og:site_name"]`, func(e *colly.HTMLElement) {
-		if result.Sitename == "" {
-			result.Sitename = e.Attr("content")
-		}
-	})
-
-	c.OnHTML(`meta[property="og:image"]`, func(e *colly.HTMLElement) {
-		webImage.URL = e.Attr("content")
-	})
-
-	c.OnHTML(`meta[property="og:image:alt"]`, func(e *colly.HTMLElement) {
-		webImage.Alt = e.Attr("content")
-	})
-
-	c.OnHTML(`meta[property="og:image:type"]`, func(e *colly.HTMLElement) {
-		webImage.Type = e.Attr("content")
-	})
-
-	c.OnHTML(`meta[property="og:image:width"]`, func(e *colly.HTMLElement) {
-		width, err := strconv.Atoi(e.Attr("content"))
-		if err == nil {
-			webImage.Width = width
-		}
-	})
-
-	c.OnHTML(`meta[property="og:image:height"]`, func(e *colly.HTMLElement) {
-		height, err := strconv.Atoi(e.Attr("content"))
-		if err == nil {
-			webImage.Height = height
-		}
-	})
-
-	c.OnScraped(func(r *colly.Response) {
-		result.Images = append(result.Images, webImage)
-		logrus.Debugf("[Colly] Scraping finished for %s", r.Request.URL.String())
-	})
-
-	// Visit the target URL
-	if err := c.Visit(targetURL); err != nil {
-		return err
-	}
-
-	// If sitename is still empty, attempt to scrape the base domain
-	if result.Sitename == "" {
-		baseDomain := getBaseDomain(targetURL)
-		if baseDomain != "" {
-			logrus.Debugf("[Colly] Attempting to scrape base domain: %s", baseDomain)
-			c2 := colly.NewCollector(
-				colly.UserAgent(userAgent),
-			)
-
-			c2.OnHTML(`meta[property="og:title"]`, func(e *colly.HTMLElement) {
-				if result.Sitename == "" {
-					result.Sitename = e.Attr("content")
-				}
-			})
-
-			if err := c2.Visit(baseDomain); err != nil {
-				logrus.Errorf("[Colly] Failed to visit base domain %s: %v", baseDomain, err)
-			}
-		}
-	}
-
-	return nil
+// isMetadataComplete checks if the metadata contains at least one essential field.
+func isMetadataComplete(metadata *MetaDataResponseItem) bool {
+	return strings.TrimSpace(metadata.Title) != "" ||
+		strings.TrimSpace(metadata.Description) != "" ||
+		strings.TrimSpace(metadata.Sitename) != "" ||
+		len(metadata.Images) > 0
 }
 
-// requiresJavaScript determines if the given URL likely requires JavaScript rendering.
-// This function can be enhanced with more sophisticated logic or configuration.
-func requiresJavaScript(targetURL string) bool {
-	parsedURL, err := urlpkg.Parse(targetURL)
+// normalizeURL ensures the URL has a scheme and is properly formatted.
+func normalizeURL(rawURL string) (string, error) {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		rawURL = "http://" + rawURL
+	}
+	parsed, err := urlpkg.Parse(rawURL)
 	if err != nil {
-		logrus.Warnf("[requiresJavaScript] Failed to parse URL %s: %v", targetURL, err)
-		return false
+		return "", err
 	}
-
-	hostname := parsedURL.Hostname()
-
-	// List of domains known to require JavaScript
-	jsRequiredDomains := map[string]bool{
-		"youtube.com":       true,
-		"www.youtube.com":   true,
-		"facebook.com":      true,
-		"www.facebook.com":  true,
-		"twitter.com":       true,
-		"www.twitter.com":   true,
-		"instagram.com":     true,
-		"www.instagram.com": true,
-		// Add more domains as needed
-	}
-
-	if _, exists := jsRequiredDomains[hostname]; exists {
-		return true
-	}
-
-	// Additionally, check for common JavaScript frameworks or patterns
-	// This is a simplistic check and can be improved
-	jsIndicators := []string{"/js/", "/javascript/", "/dynamic/"}
-	for _, indicator := range jsIndicators {
-		if strings.Contains(parsedURL.Path, indicator) {
-			return true
-		}
-	}
-
-	return false
+	return parsed.String(), nil
 }
 
 // getBaseDomain extracts the base domain (scheme + host) from the URL.
@@ -408,6 +420,31 @@ func getBaseDomain(targetURL string) string {
 	}
 
 	return parsedURL.Scheme + "://" + parsedURL.Host
+}
+
+// requiresJavaScript determines if the given domain likely requires JavaScript rendering.
+// This function can be enhanced with more sophisticated logic or configuration.
+func requiresJavaScript(domain string) bool {
+	whitelistMutex.RLock()
+	defer whitelistMutex.RUnlock()
+	_, exists := chromedpWhitelist.Get(domain)
+	return exists
+}
+
+// addToWhitelist adds a domain to the Chromedp whitelist.
+func addToWhitelist(domain string) {
+	whitelistMutex.Lock()
+	defer whitelistMutex.Unlock()
+	chromedpWhitelist.Set(domain, true, cache.NoExpiration)
+	logrus.Debugf("[Whitelist] Domain %s added to Chromedp whitelist.", domain)
+}
+
+// isWhitelisted checks if a domain is in the Chromedp whitelist.
+func isWhitelisted(domain string) bool {
+	whitelistMutex.RLock()
+	defer whitelistMutex.RUnlock()
+	_, exists := chromedpWhitelist.Get(domain)
+	return exists
 }
 
 // ParsePage is a placeholder for future functionality.
