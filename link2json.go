@@ -33,7 +33,7 @@ var (
 	LINK2JSON_DEBUG bool
 
 	// chromedpSemaphore controls the maximum number of concurrent Chromedp instances.
-	chromedpSemaphore = make(chan struct{}, 5) // Example: limit to 5 concurrent Chromedp instances
+	chromedpSemaphore = make(chan struct{}, 2) // Example: limit to 5 concurrent Chromedp instances
 )
 
 // init initializes the module, setting up logging and user agent.
@@ -258,7 +258,6 @@ func scrapeWithChromedp(targetURL string) (*MetaDataResponseItem, error) {
 		chromedp.Flag("no-sandbox", true),                      // Disable sandboxing
 		chromedp.Flag("disable-dev-shm-usage", true),           // Overcome limited resource problems
 		chromedp.Flag("blink-settings", "imagesEnabled=false"), // Optional: Disable image loading for performance
-		chromedp.UserAgent(userAgent),                          // Use the configured User-Agent
 		// chromedp.ExecPath("/usr/bin/chromium-browser"), // Uncomment and set if necessary
 	)
 
@@ -285,6 +284,8 @@ func scrapeWithChromedp(targetURL string) (*MetaDataResponseItem, error) {
 		return nil, err
 	}
 
+	logrus.Debugf("[Chromedp] Navigation successful for URL: %s", targetURL)
+
 	// Parse the rendered HTML using goquery
 	result := &MetaDataResponseItem{
 		URL:    targetURL,
@@ -296,6 +297,8 @@ func scrapeWithChromedp(targetURL string) (*MetaDataResponseItem, error) {
 		logrus.Errorf("[Chromedp] Failed to parse HTML for URL %s: %v", targetURL, err)
 		return nil, err
 	}
+
+	logrus.Debugf("[Chromedp] Title: %s, Description: %s, Sitename: %s, Images: %d", result.Title, result.Description, result.Sitename, len(result.Images))
 
 	return result, nil
 }
