@@ -395,8 +395,8 @@ func parseHTMLWithGoquery(htmlContent string, result *MetaDataResponseItem) erro
 func isMetadataComplete(metadata *MetaDataResponseItem) bool {
 	return strings.TrimSpace(metadata.Title) != "" ||
 		strings.TrimSpace(metadata.Description) != "" ||
-		strings.TrimSpace(metadata.Sitename) != "" ||
-		len(metadata.Images) > 0
+		strings.TrimSpace(metadata.Sitename) != "" &&
+			len(metadata.Images) > 0
 }
 
 // normalizeURL ensures the URL has a scheme and is properly formatted.
