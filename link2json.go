@@ -103,9 +103,23 @@ func GetMetadata(targetURL string) (*MetaDataResponseItem, error) {
 }
 
 // fetchRenderedHTML uses Chromedp to navigate to the URL and return the rendered HTML.
+// fetchRenderedHTML uses Chromedp to navigate to the URL and return the rendered HTML.
 func fetchRenderedHTML(targetURL string) (string, error) {
-	// Create a new Chromedp context
-	ctx, cancel := chromedp.NewContext(context.Background())
+	// Create a new Chromedp context with headless options
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true), // Ensure headless mode
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.UserAgent(userAgent), // Use the configured User-Agent
+	)
+
+	// Create an ExecAllocator context with the options
+	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	defer cancel()
+
+	// Create a new Chromedp context from the allocator context
+	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
 	// Set a timeout to prevent hanging
