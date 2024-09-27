@@ -2,7 +2,6 @@ package link2json
 
 import (
 	"context"
-	"net/url"
 	urlpkg "net/url"
 	"os"
 	"strconv"
@@ -363,7 +362,7 @@ func requiresJavaScript(targetURL string) bool {
 
 // getBaseDomain extracts the base domain (scheme + host) from the URL.
 func getBaseDomain(targetURL string) string {
-	parsedURL, err := url.Parse(targetURL)
+	parsedURL, err := urlpkg.Parse(targetURL)
 	if err != nil {
 		logrus.Warnf("[getBaseDomain] Failed to parse URL %s: %v", targetURL, err)
 		return ""
