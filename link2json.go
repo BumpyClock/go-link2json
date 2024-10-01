@@ -43,7 +43,7 @@ func init() {
 		logrus.SetLevel(logrus.InfoLevel)
 	}
 
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+	userAgent = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
 
 	if value, exists := os.LookupEnv("LINK2JSON_USER_AGENT"); exists {
 		userAgent = value
