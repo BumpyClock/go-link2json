@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	urlpkg "net/url"
 	"os"
 	"strconv"
@@ -52,7 +54,13 @@ func init() {
 
 func GetMetadata(targetURL string) (*MetaDataResponseItem, error) {
 	normalizedURL, err := normalizeURL(targetURL)
+
 	if err != nil {
+		logrus.Errorf("[link2json] [GetMetadata] Invalid URL %s: %v", targetURL, err)
+		return nil, err
+	}
+
+	if !IsUrl(normalizedURL) {
 		logrus.Errorf("[link2json] [GetMetadata] Invalid URL %s: %v", targetURL, err)
 		return nil, err
 	}
@@ -434,6 +442,25 @@ func normalizeURL(rawURL string) (string, error) {
 		return "", err
 	}
 	return parsed.String(), nil
+}
+
+func IsUrl(str string) bool {
+	url, err := url.ParseRequestURI(str)
+	if err != nil {
+		logrus.Info(err.Error())
+		return false
+	}
+
+	address := net.ParseIP(url.Host)
+	logrus.Info("url-info", "host", address)
+
+	if address == nil {
+		logrus.Info("url-info", "host", url.Host)
+
+		return strings.Contains(url.Host, ".")
+	}
+
+	return true
 }
 
 func getBaseDomain(targetURL string) string {
